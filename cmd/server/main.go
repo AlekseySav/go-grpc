@@ -17,21 +17,18 @@ import (
 )
 
 func main() {
-	// 1. gRPC сервер
 	lis, _ := net.Listen("tcp", ":50051")
 	grpcSrv := grpc.NewServer()
 	reflection.Register(grpcSrv)
 	blog.RegisterBlogServiceServer(grpcSrv, handler.NewServer())
 	go func() { fmt.Println("gRPC listening on :50051"); grpcSrv.Serve(lis) }()
 
-	// 2. gRPC-Gateway
 	mux := runtime.NewServeMux()
 	blog.RegisterBlogServiceHandlerFromEndpoint(
 		context.Background(), mux, "localhost:50051",
 		[]grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())},
 	)
 
-	// 3. HTTP роутер (API + Swagger)
 	httpMux := http.NewServeMux()
 	httpMux.Handle("/v1/", mux)
 	httpMux.Handle("/swagger/", http.StripPrefix("/swagger/", http.FileServer(http.Dir("swagger"))))

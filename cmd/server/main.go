@@ -5,22 +5,37 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 
 	"blog/gen/blog"
+	"blog/internal/db"
 	"blog/internal/handler"
+	"blog/internal/repository"
 
 	"github.com/grpc-ecosystem/grpc-gateway/v2/runtime"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
-
 	"google.golang.org/grpc/reflection"
 )
 
 func main() {
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		dsn = "host=localhost user=postgres password=postgres dbname=blog port=5432 sslmode=disable"
+	}
+
+	database, err := db.Connect(dsn)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "db connect: %v\n", err)
+		os.Exit(1)
+	}
+
+	repo := repository.NewPostRepository(database)
+
 	lis, _ := net.Listen("tcp", ":50051")
 	grpcSrv := grpc.NewServer()
 	reflection.Register(grpcSrv)
-	blog.RegisterBlogServiceServer(grpcSrv, handler.NewServer())
+	blog.RegisterBlogServiceServer(grpcSrv, handler.NewServer(repo))
 	go func() { fmt.Println("gRPC listening on :50051"); grpcSrv.Serve(lis) }()
 
 	mux := runtime.NewServeMux()

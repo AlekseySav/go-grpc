@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"blog/internal/cache"
 	"blog/internal/db"
 	pb "blog/gen/blog"
 
@@ -13,42 +14,47 @@ import (
 )
 
 type PostRepository struct {
-	db *gorm.DB
+	db    *gorm.DB
+	likes *cache.LikeCache
+	posts *cache.PostsCache
 }
 
-func NewPostRepository(database *gorm.DB) *PostRepository {
-	return &PostRepository{db: database}
-}
-
-type postRow struct {
-	db.Post
-	LikesCount    int32
-	IsLikedByUser bool
+func NewPostRepository(database *gorm.DB, likes *cache.LikeCache, posts *cache.PostsCache) *PostRepository {
+	return &PostRepository{db: database, likes: likes, posts: posts}
 }
 
 func (r *PostRepository) GetPosts(ctx context.Context, userID string, limit, offset int32) ([]*pb.Post, error) {
 	if limit == 0 {
 		limit = 20
 	}
-	var rows []postRow
-	err := r.db.WithContext(ctx).Raw(`
-		SELECT p.*,
-		       COUNT(l.user_id)::int AS likes_count,
-		       EXISTS(SELECT 1 FROM likes WHERE post_id = p.id AND user_id = ?) AS is_liked_by_user
-		FROM posts p
-		LEFT JOIN likes l ON l.post_id = p.id
-		GROUP BY p.id
-		ORDER BY p.created_at DESC
-		LIMIT ? OFFSET ?
-	`, userID, limit, offset).Scan(&rows).Error
+
+	dbPosts, hit, err := r.posts.Get(ctx, limit, offset)
 	if err != nil {
 		return nil, err
 	}
-	posts := make([]*pb.Post, len(rows))
-	for i, row := range rows {
-		posts[i] = toProto(row.Post, row.LikesCount, row.IsLikedByUser)
+	if !hit {
+		if err := r.db.WithContext(ctx).Order("created_at DESC").Limit(int(limit)).Offset(int(offset)).Find(&dbPosts).Error; err != nil {
+			return nil, err
+		}
+		_ = r.posts.Set(ctx, limit, offset, dbPosts)
 	}
-	return posts, nil
+
+	ids := make([]string, len(dbPosts))
+	for i, p := range dbPosts {
+		ids[i] = p.ID
+	}
+
+	stats, err := r.likes.GetStats(ctx, userID, ids)
+	if err != nil {
+		return nil, err
+	}
+
+	result := make([]*pb.Post, len(dbPosts))
+	for i, p := range dbPosts {
+		s := stats[p.ID]
+		result[i] = toProto(p, int32(s.Count), s.Liked)
+	}
+	return result, nil
 }
 
 func (r *PostRepository) CreatePost(ctx context.Context, authorID, nickname, photoURL, body string) (*pb.Post, error) {
@@ -63,6 +69,7 @@ func (r *PostRepository) CreatePost(ctx context.Context, authorID, nickname, pho
 	if err := r.db.WithContext(ctx).Create(&post).Error; err != nil {
 		return nil, err
 	}
+	_ = r.posts.Invalidate(ctx)
 	return toProto(post, 0, false), nil
 }
 
@@ -75,43 +82,37 @@ func (r *PostRepository) UpdatePost(ctx context.Context, id, body string) (*pb.P
 	if err := r.db.WithContext(ctx).Save(&post).Error; err != nil {
 		return nil, err
 	}
-	var count int64
-	r.db.Model(&db.Like{}).Where("post_id = ?", id).Count(&count)
-	return toProto(post, int32(count), false), nil
+	_ = r.posts.Invalidate(ctx)
+	stats, err := r.likes.GetStats(ctx, "", []string{id})
+	if err != nil {
+		return nil, err
+	}
+	s := stats[id]
+	return toProto(post, int32(s.Count), false), nil
 }
 
 func (r *PostRepository) DeletePost(ctx context.Context, id string) error {
-	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		tx.Where("post_id = ?", id).Delete(&db.Like{})
-		return tx.Where("id = ?", id).Delete(&db.Post{}).Error
-	})
+	if err := r.db.WithContext(ctx).Where("id = ?", id).Delete(&db.Post{}).Error; err != nil {
+		return err
+	}
+	_ = r.posts.Invalidate(ctx)
+	return r.likes.Delete(ctx, id)
 }
 
 func (r *PostRepository) ToggleLike(ctx context.Context, postID, userID string) (*pb.Post, error) {
-	var existing db.Like
-	err := r.db.WithContext(ctx).Where("post_id = ? AND user_id = ?", postID, userID).First(&existing).Error
-	if err == gorm.ErrRecordNotFound {
-		r.db.WithContext(ctx).Create(&db.Like{PostID: postID, UserID: userID})
-	} else if err == nil {
-		r.db.WithContext(ctx).Where("post_id = ? AND user_id = ?", postID, userID).Delete(&db.Like{})
-	} else {
+	var post db.Post
+	if err := r.db.WithContext(ctx).First(&post, "id = ?", postID).Error; err != nil {
+		return nil, fmt.Errorf("post not found: %w", err)
+	}
+	if _, err := r.likes.Toggle(ctx, postID, userID); err != nil {
 		return nil, err
 	}
-
-	var rows []postRow
-	err = r.db.WithContext(ctx).Raw(`
-		SELECT p.*,
-		       COUNT(l.user_id)::int AS likes_count,
-		       EXISTS(SELECT 1 FROM likes WHERE post_id = p.id AND user_id = ?) AS is_liked_by_user
-		FROM posts p
-		LEFT JOIN likes l ON l.post_id = p.id
-		WHERE p.id = ?
-		GROUP BY p.id
-	`, userID, postID).Scan(&rows).Error
-	if err != nil || len(rows) == 0 {
-		return nil, fmt.Errorf("post not found")
+	stats, err := r.likes.GetStats(ctx, userID, []string{postID})
+	if err != nil {
+		return nil, err
 	}
-	return toProto(rows[0].Post, rows[0].LikesCount, rows[0].IsLikedByUser), nil
+	s := stats[postID]
+	return toProto(post, int32(s.Count), s.Liked), nil
 }
 
 func toProto(p db.Post, likesCount int32, isLiked bool) *pb.Post {

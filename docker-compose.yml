@@ -13,6 +13,16 @@ services:
       timeout: 5s
       retries: 5
 
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
   server:
     build: .
     ports:
@@ -20,6 +30,9 @@ services:
       - "50051:50051"
     environment:
       DATABASE_URL: "host=db user=postgres password=postgres dbname=blog port=5432 sslmode=disable"
+      REDIS_URL: "redis:6379"
     depends_on:
       db:
+        condition: service_healthy
+      redis:
         condition: service_healthy

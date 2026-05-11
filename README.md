@@ -38,6 +38,33 @@ curl -X DELETE http://localhost:8080/v1/posts/<id>
 
 User identity is passed via `x-user-id` header.
 
+## Cache verification
+
+```bash
+# create a post
+curl -s -X POST http://localhost:8080/v1/posts \
+  -H "Content-Type: application/json" \
+  -H "x-user-id: user1" \
+  -d '{"body":"test"}' | jq .
+
+# GET posts — cache miss, populates Redis
+curl -s http://localhost:8080/v1/posts | jq .
+
+# verify key exists in Redis
+docker compose exec redis redis-cli KEYS "posts:*"
+
+# GET posts again — cache hit (no DB query)
+curl -s http://localhost:8080/v1/posts | jq .
+
+# inspect cached value
+docker compose exec redis redis-cli GET "posts:20:0"
+
+# TTL remaining
+docker compose exec redis redis-cli TTL "posts:20:0"
+```
+
+Create/update/delete post invalidates all `posts:*` keys. TTL: 60s.
+
 ## Development
 
 ### Regenerate proto

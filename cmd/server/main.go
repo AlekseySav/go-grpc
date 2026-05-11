@@ -8,10 +8,12 @@ import (
 	"os"
 
 	"blog/gen/blog"
+	"blog/internal/cache"
 	"blog/internal/db"
 	"blog/internal/handler"
 	"blog/internal/repository"
 
+	"github.com/redis/go-redis/v9"
 	"github.com/grpc-ecosystem/grpc-gateway/v2/runtime"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -23,6 +25,10 @@ func main() {
 	if dsn == "" {
 		dsn = "host=localhost user=postgres password=postgres dbname=blog port=5432 sslmode=disable"
 	}
+	redisAddr := os.Getenv("REDIS_URL")
+	if redisAddr == "" {
+		redisAddr = "localhost:6379"
+	}
 
 	database, err := db.Connect(dsn)
 	if err != nil {
@@ -30,7 +36,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	repo := repository.NewPostRepository(database)
+	rdb := redis.NewClient(&redis.Options{Addr: redisAddr})
+	if err := rdb.Ping(context.Background()).Err(); err != nil {
+		fmt.Fprintf(os.Stderr, "redis connect: %v\n", err)
+		os.Exit(1)
+	}
+
+	repo := repository.NewPostRepository(database, cache.NewLikeCache(rdb), cache.NewPostsCache(rdb))
 
 	lis, _ := net.Listen("tcp", ":50051")
 	grpcSrv := grpc.NewServer()

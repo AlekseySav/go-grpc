@@ -10,8 +10,3 @@ type Post struct {
 	Body           string    `gorm:"not null"`
 	CreatedAt      time.Time `gorm:"autoCreateTime"`
 }
-
-type Like struct {
-	PostID string `gorm:"primaryKey"`
-	UserID string `gorm:"primaryKey"`
-}

@@ -10,5 +10,5 @@ func Connect(dsn string) (*gorm.DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	return db, db.AutoMigrate(&Post{}, &Like{})
+	return db, db.AutoMigrate(&Post{})
 }
